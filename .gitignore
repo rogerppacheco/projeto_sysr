@@ -1,0 +1,38 @@
+# Scripts com credenciais embutidas
+load_test.py
+get_pap_cols.py
+get_cliente_cols.py
+print_cols.py
+list_tables.py
+check_schemas.py
+cleanup_jobs.py
+check_job_fila.py
+check_db.py
+check_db2.py
+disable_users.py
+check_operadoras.py
+check_crm_venda.py
+find_table.py
+check_all.py
+check_sysr.py
+fix_tasks_celery.py
+
+# Logs e relatórios
+logs.txt
+railway_logs.txt
+diff_report.json
+query.txt
+*.log
+
+# Ambiente e segredos
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/

@@ -1,0 +1,18 @@
+[submodule "nova-velox"]
+	path = nova-velox
+	url = https://github.com/rogerppacheco/nova-velox.git
+[submodule "site-bn"]
+	path = site-bn
+	url = https://github.com/rogerppacheco/site-bn.git
+[submodule "site-clickup"]
+	path = site-clickup
+	url = https://github.com/rogerppacheco/clickup.git
+[submodule "site-gm"]
+	path = site-gm
+	url = https://github.com/rogerppacheco/site-gm.git
+[submodule "site-record"]
+	path = site-record
+	url = https://github.com/rogerppacheco/site-record.git
+[submodule "site-rosso"]
+	path = site-rosso
+	url = https://github.com/rogerppacheco/site-rosso.git
