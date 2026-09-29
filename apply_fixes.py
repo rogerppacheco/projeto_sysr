@@ -1,15 +1,30 @@
-import os
-import subprocess
+"""Aplica nos sites o patch de Celery, print de no_results e logs ZAPI/Evolution.
+
+Uso:
+    python apply_fixes.py --dry-run          # mostra o diff, não grava nada
+    python apply_fixes.py --no-push          # grava e commita, sem push
+    python apply_fixes.py                    # grava, commita e faz push
+    python apply_fixes.py --projects site-gm site-bn
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+from patch_utils import PatchError, SourceFile, commit_files, ensure_clean_worktree
 
 PROJECTS = [
     "site-rosso",
     "site-clickup",
     "site-gm",
     "site-bn",
-    "nova-velox"
+    "nova-velox",
 ]
 
-BASE_DIR = r"c:\Projeto_Sysr"
+BASE_DIR = Path(__file__).resolve().parent
+
+COMMIT_MESSAGE = "fix: envia print no_results, adiciona logs ZAPI/Evolution e corrige Celery"
 
 CELERY_CONFIG = """
 # Configurações do Celery
@@ -21,6 +36,7 @@ CELERY_RESULT_SERIALIZER = 'json'
 CELERY_TIMEZONE = TIME_ZONE
 """
 
+# Nos trechos abaixo, "\\n" é intencional: vira o escape \n dentro do código Python de destino.
 WEBHOOK_TARGET = """            if msg == "no_results" or not detalhes:
                 whatsapp.enviar_mensagem_texto(
                     telefone,
@@ -87,61 +103,90 @@ EVO_REPLACEMENT = """        resp = self._request("POST", path, payload, timeout
         logger.error("[Evolution] Falha ao enviar imagem. Resposta nao indica sucesso: %s", resp)
         return None"""
 
-def fix_celery_py(project_dir):
-    path = os.path.join(project_dir, "core_config", "celery.py")
-    if not os.path.exists(path): return False
-    with open(path, "r", encoding="utf-8") as f:
-        content = f.read()
-    content = content.replace("'core_config.settings'", "'gestao_equipes.settings'")
-    content = content.replace("Celery('core_config')", "Celery('gestao_equipes')")
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(content)
-    return True
+REPLACEMENTS = [
+    (Path("core_config", "celery.py"), "'core_config.settings'", "'gestao_equipes.settings'"),
+    (Path("core_config", "celery.py"), "Celery('core_config')", "Celery('gestao_equipes')"),
+    (Path("crm_app", "whatsapp_webhook_handler.py"), WEBHOOK_TARGET, WEBHOOK_REPLACEMENT),
+    (Path("crm_app", "services", "whatsapp", "zapi_provider.py"), ZAPI_TARGET, ZAPI_REPLACEMENT),
+    (Path("crm_app", "services", "whatsapp", "evolution_provider.py"), EVO_TARGET, EVO_REPLACEMENT),
+]
 
-def fix_settings_py(project_dir):
-    path = os.path.join(project_dir, "gestao_equipes", "settings.py")
-    if not os.path.exists(path): return False
-    with open(path, "r", encoding="utf-8") as f:
-        content = f.read()
-    if "CELERY_BROKER_URL" not in content:
-        content += "\\n" + CELERY_CONFIG
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(content)
-        return True
-    return False
 
-def replace_in_file(project_dir, subpath, target, replacement):
-    path = os.path.join(project_dir, subpath)
-    if not os.path.exists(path): return False
-    with open(path, "r", encoding="utf-8") as f:
-        content = f.read()
-    if target in content:
-        content = content.replace(target, replacement)
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(content)
-        return True
-    return False
+def build_patches(proj_dir: Path) -> dict[Path, SourceFile]:
+    files: dict[Path, SourceFile] = {}
 
-def main():
-    for proj in PROJECTS:
-        print(f"\\nProcessing {proj}...")
-        proj_dir = os.path.join(BASE_DIR, proj)
-        if not os.path.isdir(proj_dir):
-            print(f"Directory not found: {proj_dir}")
+    def get(rel: Path) -> SourceFile | None:
+        path = proj_dir / rel
+        if not path.is_file():
+            print(f"  [AVISO] arquivo não existe: {rel}")
+            return None
+        if rel not in files:
+            files[rel] = SourceFile.load(path)
+        return files[rel]
+
+    for rel, target, replacement in REPLACEMENTS:
+        src = get(rel)
+        if src is None:
             continue
-            
-        fix_celery_py(proj_dir)
-        fix_settings_py(proj_dir)
-        replace_in_file(proj_dir, r"crm_app\\whatsapp_webhook_handler.py", WEBHOOK_TARGET, WEBHOOK_REPLACEMENT)
-        replace_in_file(proj_dir, r"crm_app\\services\\whatsapp\\zapi_provider.py", ZAPI_TARGET, ZAPI_REPLACEMENT)
-        replace_in_file(proj_dir, r"crm_app\\services\\whatsapp\\evolution_provider.py", EVO_TARGET, EVO_REPLACEMENT)
-        
-        # Git commit and push
-        print(f"Committing and pushing {proj}...")
-        subprocess.run(["git", "add", "."], cwd=proj_dir)
-        subprocess.run(["git", "commit", "-m", "fix: envia print no_results, adiciona logs ZAPI/Evolution e corrige Celery"], cwd=proj_dir)
-        subprocess.run(["git", "push"], cwd=proj_dir)
-        print(f"Done {proj}")
+        status = src.replace_once(target, replacement)
+        if status == "nao_encontrado":
+            print(f"  [AVISO] trecho não encontrado em {rel}; pulando")
+
+    settings = get(Path("gestao_equipes", "settings.py"))
+    if settings is not None and "CELERY_BROKER_URL" not in settings.text:
+        settings.append_block(CELERY_CONFIG)
+
+    return {rel: src for rel, src in files.items() if src.changed}
+
+
+def process_project(proj: str, dry_run: bool, push: bool) -> bool:
+    print(f"\n=== {proj}")
+    proj_dir = BASE_DIR / proj
+    if not proj_dir.is_dir():
+        print(f"  [ERRO] diretório não encontrado: {proj_dir}")
+        return False
+
+    try:
+        ensure_clean_worktree(proj_dir)
+        changed = build_patches(proj_dir)
+        if not changed:
+            print("  Nada a alterar (patch já aplicado).")
+            return True
+
+        for src in changed.values():
+            src.validate()
+
+        if dry_run:
+            for src in changed.values():
+                print(src.diff())
+            return True
+
+        for src in changed.values():
+            src.save()
+            print(f"  gravado: {src.path.relative_to(proj_dir)}")
+
+        commit_files(proj_dir, [src.path for src in changed.values()], COMMIT_MESSAGE, push=push)
+        print("  commit" + (" e push" if push else "") + " concluídos")
+        return True
+    except PatchError as exc:
+        print(f"  [ERRO] {exc}")
+        return False
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--dry-run", action="store_true", help="mostra o diff sem gravar nada")
+    parser.add_argument("--no-push", action="store_true", help="commita mas não faz push")
+    parser.add_argument("--projects", nargs="+", default=PROJECTS, metavar="PROJETO")
+    args = parser.parse_args()
+
+    failures = [p for p in args.projects if not process_project(p, args.dry_run, push=not args.no_push)]
+    if failures:
+        print(f"\nFalhou em: {', '.join(failures)}")
+        return 1
+    print("\nConcluído sem erros.")
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
