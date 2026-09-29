@@ -9,6 +9,7 @@ Uso:
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from pathlib import Path
 
@@ -103,13 +104,24 @@ EVO_REPLACEMENT = """        resp = self._request("POST", path, payload, timeout
         logger.error("[Evolution] Falha ao enviar imagem. Resposta nao indica sucesso: %s", resp)
         return None"""
 
-REPLACEMENTS = [
+CELERY_PY_REPLACEMENTS = [
     (Path("core_config", "celery.py"), "'core_config.settings'", "'gestao_equipes.settings'"),
     (Path("core_config", "celery.py"), "Celery('core_config')", "Celery('gestao_equipes')"),
+]
+
+REPLACEMENTS = [
     (Path("crm_app", "whatsapp_webhook_handler.py"), WEBHOOK_TARGET, WEBHOOK_REPLACEMENT),
     (Path("crm_app", "services", "whatsapp", "zapi_provider.py"), ZAPI_TARGET, ZAPI_REPLACEMENT),
     (Path("crm_app", "services", "whatsapp", "evolution_provider.py"), EVO_TARGET, EVO_REPLACEMENT),
 ]
+
+
+def django_settings_module(proj_dir: Path) -> str | None:
+    match = re.search(
+        r"setdefault\(\s*['\"]DJANGO_SETTINGS_MODULE['\"]\s*,\s*['\"]([\w.]+)['\"]",
+        (proj_dir / "manage.py").read_text(encoding="utf-8"),
+    )
+    return match.group(1) if match else None
 
 
 def build_patches(proj_dir: Path) -> dict[Path, SourceFile]:
@@ -124,7 +136,14 @@ def build_patches(proj_dir: Path) -> dict[Path, SourceFile]:
             files[rel] = SourceFile.load(path)
         return files[rel]
 
-    for rel, target, replacement in REPLACEMENTS:
+    replacements = list(REPLACEMENTS)
+    settings_module = django_settings_module(proj_dir)
+    if settings_module == "gestao_equipes.settings":
+        replacements = CELERY_PY_REPLACEMENTS + replacements
+    else:
+        print(f"  [AVISO] manage.py usa {settings_module}; core_config/celery.py não será alterado")
+
+    for rel, target, replacement in replacements:
         src = get(rel)
         if src is None:
             continue
